@@ -1,6 +1,7 @@
 import os
 from functools import partial
 import json
+from time import sleep
 
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
@@ -8,14 +9,25 @@ import numpy as np
 from tqdm.auto import tqdm
 from tqdm.contrib.concurrent import thread_map
 from IPython.display import clear_output
+from sklearn.model_selection import train_test_split
+
+import ipywidgets as widgets
+from IPython.display import display, Image, Markdown
+from superintendent import ClassLabeller
 
 
 class DialogDataset(Dataset):
-    def __init__(self, dialogs, min_length=0, max_length=np.inf,
-                 path2features=None, model=None, tokenizer=None, device='cpu'):
-        if isinstance(dialogs, str) and dialogs.endswith('json'):
-            self.from_json(dialogs)
+    def __init__(
+        self, dialogs, min_length=0, max_length=np.inf,
+        path2features=None, model=None, tokenizer=None, device='cpu',
+        indices=None
+    ):
+        self.indices = indices
+        if isinstance(dialogs, str) and dialogs.endswith('.json'):
+            self.from_json(dialogs, indices=self.indices)
         else:
+            if self.indices is not None:
+                self.dialogs = [self.dialogs[idx] for idx in self.indices]
             self.dialogs = dialogs
             self.utters = []
             self.contexts = []
@@ -46,6 +58,12 @@ class DialogDataset(Dataset):
                 tokenizer=self.tokenizer, device=device
             )
 
+        self.image_dataset = None
+        if not hasattr(self, 'image_scores'):
+            self.image_scores = [None]*len(self)
+        if not hasattr(self, 'image_indices'):
+            self.image_indices = [None]*len(self)
+
     def __getitem__(self, idx):
         item = {'idx': idx, 'utter': self.utters[idx],
                 'context': self.contexts[idx],
@@ -55,53 +73,115 @@ class DialogDataset(Dataset):
             item['features'] = torch.load(self.feature_paths[idx]) if self.feature_paths[idx] is not None else None
         if hasattr(self, 'image_dataset'):
             item['image_score'] = self.image_scores[idx]
-            item['image_index'] = self.image_indices[idx]
+            item['image_idx'] = self.image_indices[idx]
             item['image_dict'] = self.image_dataset[self.image_indices[idx]]
         return item
 
     def __len__(self):
         return len(self.utters)
 
-    def annotate_utters(self, n=None, path=None, skip_annotated=False):
-        n = n if n is not None else len(self)
-        for idx in range(n):
-            if skip_annotated and self.image_like_flags[idx] is not None:
-                continue
-            print(*self.contexts[idx], sep='\n')
-            print(f'Utter: "{self.utters[idx]}"')
-            image_like = input('Is image like? (y/n)').strip() == 'y'
-            self.image_like_flags[idx] = image_like
+    # def test_dataset(self, n_splits):
+    #     for _ in range(n_splits):
+    #         train_indices, test_indices = train_test_split(np.arange(len(self)), test_size=0.2)
+
+    def label_samples(self, indices, path=None, skip_annotated=False, use_images=True):
+        def save_labels(widget, indices, path):
+            for idx, label in zip(indices, widget.new_labels):
+                if label is not None:
+                    self.image_like_flags[idx] = label
             if path:
                 self.to_json(path)
-            clear_output(wait=True)
+
+        def display_func(args):
+            utter, context, image_path = args
+
+            formatted_context = '\n'.join(f'    {utter}' for utter in context)
+            display(Markdown(f"""
+                **Context:**
+                {formatted_context}
+                """))
+
+            display(Markdown(f"""
+                **Utter:**
+                    {utter}
+                """))
+
+            display(Image(filename=image_path, width=300, height=300))
+
+        if skip_annotated:
+            indices = list(filter(lambda i: self.image_like_flags[i] is None, indices))
+        if use_images:
+            widget = ClassLabeller(
+                features=zip(
+                    (self.utters[idx] for idx in indices),
+                    (self.contexts[idx] for idx in indices),
+                    (self.image_dataset[self.image_indices[idx]]['path2image'] for idx in indices)),
+                options=['Yes', 'No'],
+                display_func=display_func
+            )
+
+            display(widget)
+            # while any(label is None for label in widget.new_labels):
+            #     save_labels(widget, indices, path)
+            #     sleep(1)
+            # save_labels(widget, indices, path)
+        else:
+            for idx in indices:
+                if skip_annotated and self.image_like_flags[idx] is not None:
+                    continue
+                print(*self.contexts[idx], sep='\n')
+                print(f'Utter: "{self.utters[idx]}"')
+                image_like = input('Is image like? (y/n)').strip() == 'y'
+                self.image_like_flags[idx] = image_like
+                if path:
+                    self.to_json(path)
+                clear_output(wait=True)
 
     def to_json(self, path):
         items = []
         for idx in range(len(self)):
-            item = {'context': self.contexts[idx],
-                    'utter': self.utters[idx],
-                    'image_like': self.image_like_flags[idx]}
+            item = {
+                'context': self.contexts[idx], 'utter': self.utters[idx],
+                'image_like': self.image_like_flags[idx],
+                'image_idx': self.image_indices[idx],
+                'image_score': self.image_scores[idx]
+            }
             items.append(item)
         with open(path, 'w') as f:
-            json.dump(items, f)
+            json.dump(items, f, indent=4)
 
-    def from_json(self, path):
-        self.dialogs, self.contexts, self.utters, self.image_like_flags = [], [], [], []
+    def from_json(self, path, indices=None):
+        self.dialogs, self.contexts, self.utters = [], [], []
+        self.image_like_flags, self.image_indices, self.image_scores = [], [], []
         with open(path, 'r') as f:
-            for item in json.load(f):
-                self.contexts.append(item['context'])
-                self.utters.append(item['utter'])
-                self.dialogs.append(item['context'] + [item['utter']])
+            items = list(json.load(f))
+        if indices is not None:
+            items = [items[idx] for idx in indices]
+        for item in items:
+            self.contexts.append(item['context'])
+            self.utters.append(item['utter'])
+            self.dialogs.append(item['context'] + [item['utter']])
+            if 'image_like' in item:
                 self.image_like_flags.append(item['image_like'])
+            if 'image_idx' in item:
+                self.image_indices.append(item['image_idx'])
+            if 'image_score' in item:
+                self.image_scores.append(item['image_score'])
+        if not self.image_like_flags:
+            self.image_like_flags = [None] * len(self)
+        if not self.image_indices:
+            self.image_indices = [None] * len(self)
+        if not self.image_scores:
+            self.image_scores = [None] * len(self)
 
     # def load_feature_vectors(self, path='text_feature_vectors.pt'):
     #     self.feature_vectors = torch.load(path)
 
-    def get_feature_vectors(self):
+    def get_feature_vectors(self, max_workers=16):
         feature_vectors = [None] * len(self)
         thread_map(
             partial(self._get_feature_vector, feature_vectors=feature_vectors),
-            list(range(len(self))), max_workers=16,
+            list(range(len(self))), max_workers=max_workers,
             desc="Loading feature vectors"
         )
         return torch.stack(feature_vectors)
@@ -109,18 +189,18 @@ class DialogDataset(Dataset):
     def _get_feature_vector(self, idx, feature_vectors):
         feature_vectors[idx] = torch.load(self.feature_paths[idx])
 
-    def find_closest_images(self, image_dataset, device='cpu'):
+    def find_closest_images(self, image_dataset, device='cpu', parallel=True, max_workers=None):
         self.image_dataset = image_dataset
-        self.image_scores, self.image_indices = [], []
+        image_feature_vectors = self.image_dataset.get_feature_vectors(
+            parallel=parallel, max_workers=max_workers
+        ).to(device)
 
-        image_feature_vectors = self.image_dataset.get_feature_vectors().to(device)
-
-        for path in tqdm(self.feature_paths):
+        for idx, path in enumerate(tqdm(self.feature_paths, desc="Finding closest images")):
             text_feature_vector = torch.load(path).to(device)
             similarities = image_feature_vectors.matmul(text_feature_vector)
-            sim, idx = torch.max(similarities, dim=0)
-            self.image_scores.append(sim.item())
-            self.image_indices.append(idx.item())
+            sim, image_idx = torch.max(similarities, dim=0)
+            self.image_scores[idx] = sim.item()
+            self.image_indices[idx] = image_idx.item()
 
     def _load_feature_vectors(self, path2dir, model=None, tokenizer=None, device='cpu'):
         missing_indices = []
@@ -155,31 +235,12 @@ class DialogDataset(Dataset):
 
 
 def collate_fn(data):
-    batch = {'indices': [item['idx'] for item in data],
-             'utters': [data['utter'] for data in data],
-             'contexts': [data['context'] for data in data]}
-    if 'path2features' in data[0]:
-        batch['feature_paths'] = [item['path2features'] for item in data]
-    if 'features' in data[0]:
-        batch['features'] = [item['features'] for item in data]
+    batch = {batch_key: [item[item_key] for item in data] for batch_key, item_key in [
+                 ('indices', 'idx'), ('utters', 'utter'), ('contexts', 'context')
+            ]}
+    for batch_key, item_key in [
+        ('feature_paths', 'path2features'), ('features', 'features')
+    ]:
+        if item_key in data[0]:
+            batch[batch_key] = [item[item_key] for item in data]
     return batch
-
-
-# def get_text_features(photos_dataloader, model, tokenizer, save2path='text_feature_vectors.pt', device='cpu'):
-#     feature_batches_list = []
-#     model = model.to(device)
-#     model.eval()
-#     with torch.no_grad():
-#         for batch in tqdm(photos_dataloader):
-#             text_inputs = tokenizer(text=batch['utters'], padding=True,
-#                                     truncation=True, return_tensors="pt").to(device)
-#             text_features = model.get_text_features(**text_inputs)
-#             text_features /= text_features.norm(dim=-1, keepdim=True)
-#             feature_batches_list.append(text_features.to('cpu'))
-#     feature_vectors = torch.concat(feature_batches_list, dim=0)
-#     torch.save(feature_vectors, save2path)
-#     return feature_vectors
-
-
-def get_text_dataloader(*args, **kwargs):
-    return DataLoader(*args, collate_fn=collate_fn, **kwargs)
