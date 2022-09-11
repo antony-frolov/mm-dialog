@@ -3,7 +3,7 @@ from functools import partial
 import json
 from typing import Union, List, Dict, Any
 
-from image_utils import ImageDataset
+from .image_utils import ImageDataset
 
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset

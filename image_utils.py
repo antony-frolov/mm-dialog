@@ -211,7 +211,7 @@ class ImageDataset(Dataset):
                     lst.pop(idx)
 
     def _load_image(
-        self, args: Tuple(int, str, str), path2dir: str, check_image_integrity: bool = True
+        self, args: Tuple[int, str, str], path2dir: str, check_image_integrity: bool = True
     ) -> None:
         """Helper function to load one image.
 
