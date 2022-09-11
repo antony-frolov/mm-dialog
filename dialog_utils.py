@@ -1,27 +1,47 @@
 import os
 from functools import partial
 import json
-from time import sleep
+from typing import Union, List, Dict, Any
+
+from image_utils import ImageDataset
 
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 import numpy as np
 from tqdm.auto import tqdm
 from tqdm.contrib.concurrent import thread_map
-from IPython.display import clear_output
-from sklearn.model_selection import train_test_split
-
-import ipywidgets as widgets
-from IPython.display import display, Image, Markdown
-from superintendent import ClassLabeller
+from transformers import CLIPModel, CLIPTokenizer
 
 
 class DialogDataset(Dataset):
+    """A class containing a dialog dataset with optional scores.
+
+    Attributes:
+        image_scores (List[float]): CLIP generated scores.
+        image_indices (List[int]): Indices of closest images in image dataset.
+    """
     def __init__(
-        self, dialogs, min_length=0, max_length=np.inf,
-        path2features=None, model=None, tokenizer=None, device='cpu',
-        indices=None
+        self, dialogs: Union[List[str], str], min_length: int = 0, max_length: int = np.inf,
+        path2features: str = None, model: CLIPModel = None, tokenizer: CLIPTokenizer = None,
+        device: Union[torch.device, str] = 'cpu', indices: List[int] = None
     ):
+        """
+        Args:
+            dialogs (Union[pd.Dataset, str]):
+                Either a list of dialogs or a json file containing the dataset.
+            min_length (int, optional): Min length of a sentence. Defaults to 0.
+            max_length (int, optional): Max length of a sentence. Defaults to np.inf.
+            path2features (str, optional):
+                Path to directory containing saved features. Defaults to None.
+            model (CLIPModel, optional):
+                Huggingface CLIP model. Defaults to None.
+            tokenizer (CLIPTokenizer, optional):
+                Muggingface CLIP tokenizer. Defaults to None.
+            device (Union[torch.device, str], optional):
+                PyTorch device. Defaults to 'cpu'.
+            indices (List[int], optional):
+                Indices of dialog list or json to include in dataset. Defaults to None.
+        """
         self.indices = indices
         if isinstance(dialogs, str) and dialogs.endswith('.json'):
             self.from_json(dialogs, indices=self.indices)
@@ -64,80 +84,28 @@ class DialogDataset(Dataset):
         if not hasattr(self, 'image_indices'):
             self.image_indices = [None]*len(self)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> dict:
         item = {'idx': idx, 'utter': self.utters[idx],
                 'context': self.contexts[idx],
-                'image_like': self.image_like_flags[idx]}
+                'image_like': self.image_like_flags[idx],
+                'image_score': self.image_scores[idx]}
         if self.path2features is not None:
             item['path2features'] = self.feature_paths[idx]
             item['features'] = torch.load(self.feature_paths[idx]) if self.feature_paths[idx] is not None else None
-        if hasattr(self, 'image_dataset'):
-            item['image_score'] = self.image_scores[idx]
+        if self.image_dataset is not None:
             item['image_idx'] = self.image_indices[idx]
             item['image_dict'] = self.image_dataset[self.image_indices[idx]]
         return item
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.utters)
 
-    # def test_dataset(self, n_splits):
-    #     for _ in range(n_splits):
-    #         train_indices, test_indices = train_test_split(np.arange(len(self)), test_size=0.2)
+    def to_json(self, path: str) -> None:
+        """Save dataset to json file.
 
-    def label_samples(self, indices, path=None, skip_annotated=False, use_images=True):
-        def save_labels(widget, indices, path):
-            for idx, label in zip(indices, widget.new_labels):
-                if label is not None:
-                    self.image_like_flags[idx] = label
-            if path:
-                self.to_json(path)
-
-        def display_func(args):
-            utter, context, image_path = args
-
-            formatted_context = '\n'.join(f'    {utter}' for utter in context)
-            display(Markdown(f"""
-                **Context:**
-                {formatted_context}
-                """))
-
-            display(Markdown(f"""
-                **Utter:**
-                    {utter}
-                """))
-
-            display(Image(filename=image_path, width=300, height=300))
-
-        if skip_annotated:
-            indices = list(filter(lambda i: self.image_like_flags[i] is None, indices))
-        if use_images:
-            widget = ClassLabeller(
-                features=zip(
-                    (self.utters[idx] for idx in indices),
-                    (self.contexts[idx] for idx in indices),
-                    (self.image_dataset[self.image_indices[idx]]['path2image'] for idx in indices)),
-                options=['Yes', 'No'],
-                display_func=display_func
-            )
-
-            display(widget)
-            # while any(label is None for label in widget.new_labels):
-            #     save_labels(widget, indices, path)
-            #     sleep(1)
-            # save_labels(widget, indices, path)
-        else:
-            for idx in indices:
-                if skip_annotated and self.image_like_flags[idx] is not None:
-                    continue
-                print(*self.contexts[idx], sep='\n')
-                print(f'Utter: "{self.utters[idx]}"')
-                image_like = input('Is image like? (y/n)').strip() == 'y'
-                self.image_like_flags[idx] = image_like
-                if path:
-                    self.to_json(path)
-                clear_output(wait=True)
-
-    def to_json(self, path):
+        Args:
+            path (str): Path to json file.
+        """
         items = []
         for idx in range(len(self)):
             item = {
@@ -150,7 +118,14 @@ class DialogDataset(Dataset):
         with open(path, 'w') as f:
             json.dump(items, f, indent=4)
 
-    def from_json(self, path, indices=None):
+    def from_json(self, path: str, indices: List[int] = None) -> None:
+        """Load dataset from json file.
+
+        Args:
+            path (str): Path to json file.
+            indices (List[int], optional):
+                Indices of the dataset to load. Defaults to None.
+        """
         self.dialogs, self.contexts, self.utters = [], [], []
         self.image_like_flags, self.image_indices, self.image_scores = [], [], []
         with open(path, 'r') as f:
@@ -177,19 +152,43 @@ class DialogDataset(Dataset):
     # def load_feature_vectors(self, path='text_feature_vectors.pt'):
     #     self.feature_vectors = torch.load(path)
 
-    def get_feature_vectors(self, max_workers=16):
+    def get_feature_vectors(self, max_workers: int = 16) -> None:
+        """Load feature vector tensors from disk.
+
+        Args:
+            max_workers (int, optional): Max number of workers to spawn. Defaults to 16.
+        """
         feature_vectors = [None] * len(self)
         thread_map(
             partial(self._get_feature_vector, feature_vectors=feature_vectors),
             list(range(len(self))), max_workers=max_workers,
-            desc="Loading feature vectors"
+            desc="Loading feature vector paths"
         )
         return torch.stack(feature_vectors)
 
-    def _get_feature_vector(self, idx, feature_vectors):
+    def _get_feature_vector(self, idx: int, feature_vectors: List[torch.Tensor]) -> None:
+        """Helper function to load one feature vector from disk.
+
+        Args:
+            idx (int): _description_
+            feature_vectors (List[torch.Tensor]): List of all feature vectors.
+        """
         feature_vectors[idx] = torch.load(self.feature_paths[idx])
 
-    def find_closest_images(self, image_dataset, device='cpu', parallel=True, max_workers=None):
+    def find_closest_images(
+        self, image_dataset: ImageDataset, device: Union[str, torch.device] = 'cpu',
+        parallel: bool = True, max_workers: int = None
+    ):
+        """Find closest image for each utterance in the dataset.
+
+        Args:
+            image_dataset (ImageDataset): Image dataset to search in.
+            device (Union[str, torch.device], optional): PyTorch device. Defaults to 'cpu'.
+            parallel (bool, optional):
+                If True loads feature vectors in parallel. Defaults to True.
+            max_workers (int, optional):
+                Max number of workers to spawn when loading in parallel. Defaults to None.
+        """
         self.image_dataset = image_dataset
         image_feature_vectors = self.image_dataset.get_feature_vectors(
             parallel=parallel, max_workers=max_workers
@@ -202,7 +201,21 @@ class DialogDataset(Dataset):
             self.image_scores[idx] = sim.item()
             self.image_indices[idx] = image_idx.item()
 
-    def _load_feature_vectors(self, path2dir, model=None, tokenizer=None, device='cpu'):
+    def _load_feature_vectors(
+        self, path2dir: str, model: CLIPModel = None,
+        tokenizer: CLIPTokenizer = None, device: Union[str, torch.device] = 'cpu'
+    ):
+        """Helper function to load feature vector paths and generate missing features.
+
+        Args:
+            path2dir (str): Path to directory containing feature tensors.
+            model (CLIPModel, optional): Huggingface CLIP model. Defaults to None.
+            tokenizer (CLIPTokenizer, optional): Huggingface CLIP tokenizer. Defaults to None.
+            device (Union[str, torch.device], optional): PyTorch device. Defaults to 'cpu'.
+
+        Raises:
+            ValueError: If missing model or tokenizer to generate missing feature vectors.
+        """
         missing_indices = []
         for idx in range(len(self)):
             path = f"{os.path.join(path2dir, str(idx))}.pt"
@@ -218,8 +231,23 @@ class DialogDataset(Dataset):
                 missing_indices, model, tokenizer, path2dir, device
             )
 
-    def _generate_feature_vectors(self, indices, model, tokenizer, path2dir, device='cpu'):
-        dataloader = DataLoader(Subset(self, indices), batch_size=256, shuffle=False, collate_fn=collate_fn)
+    def _generate_feature_vectors(
+        self, indices: List[int], model: CLIPModel,
+        tokenizer: CLIPTokenizer, path2dir: str, device: Union[str, torch.device] = 'cpu'
+    ):
+        """Helper function to generate utterance feature vectors using a CLIP model.
+
+        Args:
+            indices (List[int]): Indices of the dataset to generate feature vectors for.
+            model (CLIPModel): Huggingface CLIP model.
+            tokenizer (CLIPTokenizer): Huggingface CLIP tokenizer.
+            path2dir (str): Path to directory containing feature tensors.
+            device (Union[str, torch.device], optional): PyTorch device. Defaults to 'cpu'.
+        """
+        dataloader = DataLoader(
+            Subset(self, indices), batch_size=256,
+            shuffle=False, collate_fn=collate_fn
+        )
         model = model.to(device)
         model.eval()
         with torch.no_grad():
@@ -234,7 +262,15 @@ class DialogDataset(Dataset):
                     self.feature_paths[idx] = path
 
 
-def collate_fn(data):
+def collate_fn(data: Dict[str, List[Any]]) -> Dict[str, Any]:
+    """Function to collate lists of data in a batch.
+
+    Args:
+        data (Dict[str, List[Any]]): Lists of data.
+
+    Returns:
+        Dict[str, Any]: Batach of data.
+    """
     batch = {batch_key: [item[item_key] for item in data] for batch_key, item_key in [
                  ('indices', 'idx'), ('utters', 'utter'), ('contexts', 'context')
             ]}
