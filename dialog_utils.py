@@ -62,7 +62,11 @@ class DialogDataset(Dataset):
                         self.contexts.append(context.copy())
                     context.append(utter)
 
+            self.ids = list(map(str, range(len(self))))
+
             self.image_like_flags = [None] * len(self)
+            self.image_scores = [None] * len(self)
+            self.image_indices = [None] * len(self)
 
         self.path2features = path2features
 
@@ -70,6 +74,7 @@ class DialogDataset(Dataset):
         self.tokenizer = tokenizer
         self.device = device
 
+        self.image_dataset = None
         self.feature_paths = [None] * len(self)
 
         if self.path2features is not None:
@@ -78,14 +83,9 @@ class DialogDataset(Dataset):
                 tokenizer=self.tokenizer, device=device
             )
 
-        self.image_dataset = None
-        if not hasattr(self, 'image_scores'):
-            self.image_scores = [None]*len(self)
-        if not hasattr(self, 'image_indices'):
-            self.image_indices = [None]*len(self)
-
     def __getitem__(self, idx: int) -> dict:
-        item = {'idx': idx, 'utter': self.utters[idx],
+        item = {'idx': idx, 'id': self.ids[idx],
+                'utter': self.utters[idx],
                 'context': self.contexts[idx],
                 'image_like': self.image_like_flags[idx],
                 'image_score': self.image_scores[idx]}
@@ -109,6 +109,7 @@ class DialogDataset(Dataset):
         items = []
         for idx in range(len(self)):
             item = {
+                'id': self.ids[idx],
                 'context': self.contexts[idx], 'utter': self.utters[idx],
                 'image_like': self.image_like_flags[idx],
                 'image_idx': self.image_indices[idx],
@@ -126,31 +127,32 @@ class DialogDataset(Dataset):
             indices (List[int], optional):
                 Indices of the dataset to load. Defaults to None.
         """
-        self.dialogs, self.contexts, self.utters = [], [], []
+        self.dialogs, self.contexts, self.utters, self.ids = [], [], [], []
         self.image_like_flags, self.image_indices, self.image_scores = [], [], []
         with open(path, 'r') as f:
             items = list(json.load(f))
         if indices is not None:
             items = [items[idx] for idx in indices]
-        for item in items:
+        for i, item in enumerate(items):
             self.contexts.append(item['context'])
             self.utters.append(item['utter'])
             self.dialogs.append(item['context'] + [item['utter']])
             if 'image_like' in item:
                 self.image_like_flags.append(item['image_like'])
+            else:
+                self.image_like_flags.append(None)
             if 'image_idx' in item:
                 self.image_indices.append(item['image_idx'])
+            else:
+                self.image_indices.append(None)
             if 'image_score' in item:
                 self.image_scores.append(item['image_score'])
-        if not self.image_like_flags:
-            self.image_like_flags = [None] * len(self)
-        if not self.image_indices:
-            self.image_indices = [None] * len(self)
-        if not self.image_scores:
-            self.image_scores = [None] * len(self)
-
-    # def load_feature_vectors(self, path='text_feature_vectors.pt'):
-    #     self.feature_vectors = torch.load(path)
+            else:
+                self.image_scores.append(None)
+            if 'id' in item:
+                self.ids.append(item['id'])
+            else:
+                self.ids.append(str(i))
 
     def get_feature_vectors(self, max_workers: int = 16) -> None:
         """Load feature vector tensors from disk.
@@ -217,8 +219,8 @@ class DialogDataset(Dataset):
             ValueError: If missing model or tokenizer to generate missing feature vectors.
         """
         missing_indices = []
-        for idx in range(len(self)):
-            path = f"{os.path.join(path2dir, str(idx))}.pt"
+        for idx, id in enumerate(self.ids):
+            path = f"{os.path.join(path2dir, id)}.pt"
             if os.path.exists(path):
                 self.feature_paths[idx] = path
             else:
@@ -256,8 +258,8 @@ class DialogDataset(Dataset):
                 inputs = tokenizer(text=utters, padding=True, truncation=True, return_tensors="pt").to(device)
                 features = model.get_text_features(**inputs)
                 features /= features.norm(dim=-1, keepdim=True)
-                for vector, idx in zip(features, batch['indices']):
-                    path = f"{os.path.join(path2dir, str(idx))}.pt"
+                for vector, idx, id in zip(features, batch['indices'], batch['ids']):
+                    path = f"{os.path.join(path2dir, id)}.pt"
                     torch.save(vector.to('cpu'), path)
                     self.feature_paths[idx] = path
 
@@ -272,7 +274,7 @@ def collate_fn(data: Dict[str, List[Any]]) -> Dict[str, Any]:
         Dict[str, Any]: Batach of data.
     """
     batch = {batch_key: [item[item_key] for item in data] for batch_key, item_key in [
-                 ('indices', 'idx'), ('utters', 'utter'), ('contexts', 'context')
+                 ('indices', 'idx'), ('ids', 'id'), ('utters', 'utter'), ('contexts', 'context')
             ]}
     for batch_key, item_key in [
         ('feature_paths', 'path2features'), ('features', 'features')
