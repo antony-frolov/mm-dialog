@@ -15,8 +15,8 @@ from transformers import CLIPModel, CLIPFeatureExtractor
 import pandas as pd
 
 
-class FeaturedImageDataset(Dataset, FeaturedDataset):
-    """A class containing an image dataset and its associated metadata.
+class CLIPFeaturedImageDataset(Dataset, FeaturedDataset):
+    """Class containing an image dataset with features for CLIP scoring.
     """
     def __init__(
         self, photos_df: Union[str, pd.DataFrame], path2images: str = None, width: int = 640,
@@ -114,10 +114,10 @@ class FeaturedImageDataset(Dataset, FeaturedDataset):
         return len(self.ids)
 
     def to_json(self, path: str) -> None:
-        """Save dataset to json file.
+        """Save dataset to JSON file.
 
         Args:
-            path (str): Path to json file.
+            path (str): Path to JSON file.
         """
         items = []
         for idx in tqdm(range(len(self)), desc="Saving to json"):
@@ -133,7 +133,7 @@ class FeaturedImageDataset(Dataset, FeaturedDataset):
             json.dump(items, f, indent=4)
 
     def from_json(self, path: str, indices: List[int] = None):
-        """Load dataset from json file.
+        """Load dataset from JSON file.
 
         Args:
             path (str): Path to json file.
@@ -238,8 +238,6 @@ class FeaturedImageDataset(Dataset, FeaturedDataset):
                 Huggingface CLIP model.
             feature_extractor (CLIPFeatureExtractor):
                 Huggingface CLIP feature extractor.
-            path2dir (str):
-                Path to directory containing feature tensors.
             batch_size (int):
                 Batch size for generating feature vectors.
         """

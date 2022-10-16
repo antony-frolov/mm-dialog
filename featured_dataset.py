@@ -11,6 +11,8 @@ from tqdm.contrib.concurrent import thread_map
 
 
 class FeaturedDataset(ABC):
+    """Abstract class for datasets with feature vectors.
+    """
     def __init__(
         self, path2features: str,
         model: CLIPModel, preprocessor: Callable,
@@ -22,7 +24,7 @@ class FeaturedDataset(ABC):
             model (CLIPModel): Huggingface CLIP model.
             preprocessor (Callable): Preprocessing function.
             batch_size (int): Batch size for generating feature vectors.
-            device (Union[torch.device, str], optional): PyTorch device.
+            device (Union[torch.device, str]): PyTorch device.
 
         Raises:
             ValueError: If missing model or tokenizer to generate missing feature vectors.
@@ -65,7 +67,7 @@ class FeaturedDataset(ABC):
         pass
 
     def get_feature_vectors(self) -> torch.Tensor:
-        """Get feature vectors.
+        """Get feature vectors if already loaded.
 
         Raises:
             ValueError: If feature vectors are not loaded.
@@ -79,7 +81,7 @@ class FeaturedDataset(ABC):
             raise ValueError("Missing feature vectors. Load feature vectors first.")
 
     def save_feature_vectors(self, path: str) -> None:
-        """Save feature vectors to disk.
+        """Save loaded feature vectors to disk.
 
         Raises:
             ValueError: If feature vectors are not loaded.
@@ -92,7 +94,9 @@ class FeaturedDataset(ABC):
         else:
             raise ValueError("Missing feature vectors. Load feature vectors first.")
 
-    def load_feature_vectors(self, path: str = None, max_workers: int = 16, force: bool = False) -> None:
+    def load_feature_vectors(
+        self, path: str = None, max_workers: int = 16, force: bool = False
+    ) -> None:
         """Load feature vectors from disk.
 
         Args:

@@ -1,9 +1,5 @@
-import os
-from functools import partial
 import json
 from typing import Union, List, Dict, Any
-
-from .image_dataset import FeaturedImageDataset
 
 from torch.utils.data import Dataset
 import numpy as np

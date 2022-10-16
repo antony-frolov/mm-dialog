@@ -2,7 +2,7 @@ import os
 from typing import Union, List, Dict, Any
 
 from .dialog_dataset import DialogDataset
-from .image_dataset import FeaturedImageDataset
+from .image_dataset import CLIPFeaturedImageDataset
 from .featured_dataset import FeaturedDataset
 
 import torch
@@ -11,8 +11,9 @@ from transformers import CLIPModel, CLIPTokenizer
 from tqdm.auto import tqdm
 
 
-# TODO: Make dataset tag an item attribute
 class CLIPFeaturedDialogDataset(DialogDataset, FeaturedDataset):
+    """Class containing a dialog dataset with features for CLIP scoring.
+    """
     def __init__(
         self, path2json: str, path2features: str,
         model: CLIPModel = None, tokenizer: CLIPTokenizer = None,
@@ -69,8 +70,6 @@ class CLIPFeaturedDialogDataset(DialogDataset, FeaturedDataset):
         item['scorer_dicts']['clip'] = {
             'score': self.image_scores[idx],
             'image_idx': self.image_indices[idx],
-            # 'image_dict':
-            #     self.image_dataset._get_item([self.image_indices[idx]]) if self.image_dataset is not None else None,
             'image_dataset_tag': self.image_dataset_tags[idx]
         }
 
@@ -89,13 +88,26 @@ class CLIPFeaturedDialogDataset(DialogDataset, FeaturedDataset):
             item (Dict[str, Any]): Item dict.
         """
         super(CLIPFeaturedDialogDataset, self)._load_json_item(i, item)
+
         if 'scorer_dicts' in item and 'clip' in item['scorer_dicts']:
             self.image_scores.append(item['scorer_dicts']['clip']['score'])
             self.image_indices.append(item['scorer_dicts']['clip']['image_idx'])
             self.image_dataset_tags.append(item['scorer_dicts']['clip']['image_dataset_tag'])
+            return
+
+        if 'image_score' in item:
+            self.image_scores.append(item['image_score'])
         else:
             self.image_scores.append(None)
+
+        if 'image_idx' in item:
+            self.image_indices.append(item['image_idx'])
+        else:
             self.image_indices.append(None)
+
+        if 'image_dataset_tag' in item:
+            self.image_dataset_tags.append(item['image_dataset_tag'])
+        else:
             self.image_dataset_tags.append(None)
 
     def _generate_feature_vectors(
@@ -151,21 +163,19 @@ def collate_fn(data: Dict[str, List[Any]]) -> Dict[str, Any]:
 
 class CLIPScorer:
     def __init__(
-        self, image_dataset: FeaturedImageDataset, path2features: str = None,
+        self, image_dataset: CLIPFeaturedImageDataset, path2features: str = None,
         device: Union[str, torch.device] = 'cpu', max_workers: int = None
     ):
         """
         Args:
-            image_dataset (FeaturedImageDataset):
+            image_dataset (CLIPFeaturedImageDataset):
                 Image dataset to search in.
             path2features (str, optional):
                 Path to saved feature vectors tensor.
             device (Union[str, torch.device], optional):
                 PyTorch device. Defaults to 'cpu'.
-            parallel (bool, optional):
-                If True loads feature vectors in parallel. Defaults to True.
             max_workers (int, optional):
-                Max number of workers to spawn when loading in parallel. Defaults to None.
+                Max number of workers to spawn when loading feature vectors. Defaults to None.
         """
         self.image_dataset = image_dataset
         self.device = device
@@ -178,10 +188,10 @@ class CLIPScorer:
     def score(
         self, dialog_dataset: CLIPFeaturedDialogDataset
     ):
-        """Find closest image for each utterance in the dataset.
+        """Score each item in dialog dataset with distance to the closest image in given image dataset.
 
         Args:
-            dialog_dataset (CLIPFeaturedDialogDataset): _description_
+            dialog_dataset (CLIPFeaturedDialogDataset): Dataset to score.
         """        """"""
         dialog_dataset.image_dataset = self.image_dataset
 

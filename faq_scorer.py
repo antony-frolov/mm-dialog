@@ -9,6 +9,8 @@ from sentence_transformers import SentenceTransformer
 
 
 class FAQFeaturedDialogDataset(DialogDataset, FeaturedDataset):
+    """Class containing a dialog dataset with features for FAQ scoring.
+    """
     def __init__(
         self, path2json: str, path2features: str,
         model: SentenceTransformer = None,
@@ -28,8 +30,6 @@ class FAQFeaturedDialogDataset(DialogDataset, FeaturedDataset):
                 PyTorch device. Defaults to 'cpu'.
         """
         DialogDataset.__init__(self, dialogs=path2json)
-
-        self.questions = None
 
         FeaturedDataset.__init__(
             self, path2features=path2features,
@@ -52,20 +52,20 @@ class FAQFeaturedDialogDataset(DialogDataset, FeaturedDataset):
         """Helper function to save item info into item dict for saving to JSON.
 
         Args:
-            idx (int): Item index
+            idx (int): Item index.
             item (Dict[str, Any]): Item dict.
         """
         super(FAQFeaturedDialogDataset, self)._save_json_item(idx, item)
         item['scorer_dicts']['faq'] = {
             'score': self.faq_scores[idx],
-            'questions': self.questions if self.questions is not None else None,
+            'questions': self.questions[idx]
         }
 
     def _init_attributes(self):
         """Helper function to initialize attributes when loading from json.
         """
         super(FAQFeaturedDialogDataset, self)._init_attributes()
-        self.faq_scores = []
+        self.faq_scores, self.questions = [], []
 
     def _load_json_item(self, i: int, item: Dict[str, Any]) -> None:
         """Helper function to load item info from item dict when loading from JSON.
@@ -77,8 +77,10 @@ class FAQFeaturedDialogDataset(DialogDataset, FeaturedDataset):
         super(FAQFeaturedDialogDataset, self)._load_json_item(i, item)
         if 'scorer_dicts' in item and 'faq' in item['scorer_dicts']:
             self.faq_scores.append(item['scorer_dicts']['faq']['score'])
+            self.questions.append(item['scorer_dicts']['faq']['questions'])
         else:
             self.faq_scores.append(None)
+            self.questions.append(None)
 
     def _generate_feature_vectors(
         self, indices: List[int],
@@ -89,8 +91,8 @@ class FAQFeaturedDialogDataset(DialogDataset, FeaturedDataset):
 
         Args:
             indices (List[int]): Indices of the dataset to generate feature vectors for.
-            model (CLIPModel): Huggingface CLIP model.
-            tokenizer (CLIPTokenizer): Huggingface CLIP tokenizer.
+            model (CLIPModel): Huggingface SentenceTransformer model.
+            preprocessor (Callable): Preprocessing function.
             batch_size (int): Batch size for generating feature vectors.
         """
         utters = [self.utters[idx] for idx in indices]
@@ -107,26 +109,6 @@ class FAQFeaturedDialogDataset(DialogDataset, FeaturedDataset):
             self.feature_paths[idx] = path
 
 
-# def collate_fn(data: Dict[str, List[Any]]) -> Dict[str, Any]:
-#     """Function to collate lists of data in a batch.
-
-#     Args:
-#         data (Dict[str, List[Any]]): Lists of data.
-
-#     Returns:
-#         Dict[str, Any]: Batch of data.
-#     """
-#     batch = {batch_key: [item[item_key] for item in data] for batch_key, item_key in [
-#                 ('indices', 'idx'), ('ids', 'id'), ('utters', 'utter'), ('contexts', 'context')
-#             ]}
-#     for batch_key, item_key in [
-#         ('feature_paths', 'path2features'), ('features', 'features')
-#     ]:
-#         if item_key in data[0]:
-#             batch[batch_key] = [item[item_key] for item in data]
-#     return batch
-
-
 class FAQScorer:
     def __init__(
         self, model: SentenceTransformer, questions: List[str] = None,
@@ -137,7 +119,7 @@ class FAQScorer:
             model (SentenceTransformer):
                 Huggingface SentenceTransformer model.
             questions (List[str], optional):
-                List of questions. Defaults to None.
+                List of questions to compare answers to. Defaults to None.
             device (Union[torch.device, str], optional):
                 PyTorch device. Defaults to 'cpu'.
         """
@@ -149,7 +131,17 @@ class FAQScorer:
         self, dialog_dataset: FAQFeaturedDialogDataset,
         path2features: str = None, max_workers: int = None
     ):
-        questions = [f'<Q>{q}]' for q in self.questions]
+        """Score each item in dataset with mean similarity to given questions.
+
+        Args:
+            dialog_dataset (FAQFeaturedDialogDataset):
+                Dataset to score.
+            path2features (str, optional):
+                Path to dialog dataset features tensor. Defaults to None.
+            max_workers (int, optional):
+                Maximum number of workers to spawn when loading feature vectors. Defaults to None.
+        """
+        questions = [f'<Q>{q}' for q in self.questions]
         question_embeddings = self.model.encode(
             questions, show_progress_bar=False,
             convert_to_numpy=False, convert_to_tensor=True,
@@ -163,4 +155,4 @@ class FAQScorer:
 
         similarities = torch.matmul(answer_embeddings, question_embeddings.T).mean(axis=1)
         dialog_dataset.faq_scores = similarities.tolist()
-        dialog_dataset.questions = self.questions
+        dialog_dataset.questions = [self.questions] * len(dialog_dataset)
